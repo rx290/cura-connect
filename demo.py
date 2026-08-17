@@ -12,7 +12,7 @@ from pathlib import Path
 
 import manifold3d as m3d
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "cura_plugin" / "CuraConnect" / "CuraConnect"))
 from core.geometry import CutPlane, split_solid, write_stl
 from core.connectors import ConnectorParams, apply_plug, apply_dowel, apply_dovetail, apply_snap
 

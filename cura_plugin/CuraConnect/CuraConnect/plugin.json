@@ -1,0 +1,8 @@
+{
+    "name": "Cura Connect",
+    "author": "Muhammad Asad Waseem",
+    "version": "0.1.0",
+    "description": "Splits a model into printable pieces joined by real mechanical connectors (Plug, Dowel, Snap, Dovetail).",
+    "api": 8,
+    "i18n-catalog": "cura"
+}

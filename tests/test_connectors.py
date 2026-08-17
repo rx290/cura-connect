@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import manifold3d as m3d
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cura_plugin" / "CuraConnect" / "CuraConnect"))
 from core.geometry import CutPlane, split_solid, is_watertight
 from core.connectors import (
     ConnectorParams, ConnectorResult,
