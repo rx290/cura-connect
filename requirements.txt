@@ -1,0 +1,4 @@
+manifold3d
+numpy
+numpy-stl
+pytest
