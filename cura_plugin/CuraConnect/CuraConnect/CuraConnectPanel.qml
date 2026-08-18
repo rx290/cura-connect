@@ -12,7 +12,7 @@ Item
     UM.I18nCatalog { id: catalog; name: "cura" }
 
     property var connectorTypes: ["dovetail", "plug", "dowel", "snap"]
-    property var axes: ["Z", "X", "Y"]
+    property var axes: ["Y", "X", "Z"]
 
     Column
     {
@@ -21,7 +21,7 @@ Item
 
         UM.Label
         {
-            text: catalog.i18nc("@label", "Click on the selected model to cut it at that point.")
+            text: catalog.i18nc("@label", "Click or drag on the selected model to position the cut plane, then press Cut.")
             width: UM.Theme.getSize("setting_control").width * 2
             wrapMode: Text.WordWrap
         }
@@ -131,6 +131,52 @@ Item
                 text: UM.Controller.properties.getValue("Tolerance")
                 validator: UM.FloatValidator { maxBeforeDecimal: 2; maxAfterDecimal: 2 }
                 onEditingFinished: UM.Controller.setProperty("Tolerance", text.replace(",", "."))
+            }
+        }
+
+        Row
+        {
+            spacing: UM.Theme.getSize("default_margin").width
+            UM.Label
+            {
+                text: catalog.i18nc("@label", "Plane pos.")
+                width: UM.Theme.getSize("setting_control").width / 2
+                height: UM.Theme.getSize("setting_control").height
+                verticalAlignment: Text.AlignVCenter
+            }
+            UM.TextFieldWithUnit
+            {
+                id: planePositionField
+                width: UM.Theme.getSize("setting_control").width * 0.75
+                height: UM.Theme.getSize("setting_control").height
+                unit: "mm"
+                text: UM.Controller.properties.getValue("PlanePosition")
+                validator: UM.FloatValidator { maxBeforeDecimal: 4; maxAfterDecimal: 2 }
+                onEditingFinished: UM.Controller.setProperty("PlanePosition", text.replace(",", "."))
+            }
+            UM.Label
+            {
+                text: catalog.i18nc("@label", "size")
+                width: UM.Theme.getSize("setting_control").width / 3
+                height: UM.Theme.getSize("setting_control").height
+                verticalAlignment: Text.AlignVCenter
+            }
+            UM.TextFieldWithUnit
+            {
+                id: planeSizeField
+                width: UM.Theme.getSize("setting_control").width * 0.75
+                height: UM.Theme.getSize("setting_control").height
+                unit: "mm"
+                text: UM.Controller.properties.getValue("PlaneSize")
+                validator: UM.FloatValidator { maxBeforeDecimal: 4; maxAfterDecimal: 1 }
+                onEditingFinished: UM.Controller.setProperty("PlaneSize", text.replace(",", "."))
+            }
+            Button
+            {
+                id: cutButton
+                text: catalog.i18nc("@action:button", "Cut")
+                height: UM.Theme.getSize("setting_control").height
+                onClicked: UM.Controller.triggerAction("performCut")
             }
         }
     }
