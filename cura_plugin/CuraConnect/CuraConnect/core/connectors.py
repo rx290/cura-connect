@@ -11,7 +11,7 @@ via core.geometry.place -- see that module's docstring for why the
 protrude_toward_normal flag exists and what happens if you get it backwards.
 """
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 import manifold3d as m3d
@@ -155,3 +155,186 @@ def apply_snap(piece_a, piece_b, plane: CutPlane, params: ConnectorParams,
     new_b = piece_b - socket_world
 
     return ConnectorResult(piece_a=new_a, piece_b=new_b)
+
+
+def _is_solidly_on_material(piece, center, probe_radius: float, min_fill_fraction: float = 0.3) -> bool:
+    """Is `piece` genuinely solid in the neighborhood of `center`? Uses a
+    SPHERE probe, not a cube -- a real bug, found live: a cube probe's flat
+    faces under-reach a curved hollow boundary while its CORNERS (at
+    radius*sqrt(3) from center, not radius) over-reach past one, so a cube
+    centered dead in the hollow middle of a tube still caught real wall
+    material at its corners and was wrongly called "solid." A sphere has
+    neither problem.
+
+    The threshold is 0.3, not close to 1.0: `center` sits exactly ON the
+    cut plane by construction (it's the connector's own position), so the
+    probe is always bisected by that plane -- measured directly on a solid
+    cube and a real tube wall, a valid position reliably fills exactly
+    half the probe (0.5) on each side, while a hollow or off-model position
+    fills exactly 0.0. 0.3 sits with clear margin in between rather than
+    guessing a number close to the wrong reference point (the full probe,
+    which a valid position can never fill more than half of anyway)."""
+    probe = m3d.Manifold.sphere(probe_radius, circular_segments=16).translate(list(center))
+    probe_volume = probe.volume()
+    return (probe ^ piece).volume() >= probe_volume * min_fill_fraction
+
+
+def filter_offsets_on_solid_material(piece_a, piece_b, plane: CutPlane, offsets: List[float],
+                                      probe_size: float) -> List[float]:
+    """Keep only the offsets where a probe centered there is genuinely
+    surrounded by real material in BOTH pieces. Evenly spacing connectors
+    across the seam's bounding-box span (core.geometry.suggest_connector_
+    layout) is a cheap vertex-based estimate -- fine for a solid
+    cross-section, but a hollow or thin-walled model (a vase, a pipe, a
+    lampshade) has empty space in the middle of that span, and a connector
+    placed there has nothing to attach to. This checks the real split
+    geometry with an actual boolean intersection (manifold3d's `^`
+    operator), not a guess. Real, found via live testing on an actual
+    hollow model, not assumed."""
+    probe_radius = probe_size / 2
+    return [
+        offset for offset in offsets
+        if _is_solidly_on_material(piece_a, plane.point + plane.u * offset, probe_radius)
+        and _is_solidly_on_material(piece_b, plane.point + plane.u * offset, probe_radius)
+    ]
+
+
+def local_wall_thickness(piece_a, piece_b, plane: CutPlane, offset: float,
+                          probe_extent: float, min_width: float = 3.0) -> Optional[float]:
+    """The real local material thickness at `offset` along the seam, read
+    directly from the actual split geometry -- clip a probe box to each
+    piece with a real boolean intersection and read the RESULT's own
+    bounding box (manifold3d's Manifold.bounding_box(), not a heuristic
+    guess from vertex positions). Returns None if either piece isn't
+    genuinely solid there (see _is_solidly_on_material) -- the hollow,
+    edge, or too-close-to-empty-space case.
+
+    This is what actually catches "chunky" connectors on a thin-walled
+    model: sizing a connector from the seam's overall bounding-box span
+    (a vase's ~150mm diameter) has nothing to do with how thick the wall
+    is at one specific spot (often just a few mm) -- found via a live test
+    on an actual wavy vase model where an 18mm-wide boss dwarfed an 8mm
+    wall, not assumed.
+
+    Two different probe sizes are used deliberately: a small, tight one
+    (min_width) to decide IS there material here at all, and a bigger one
+    (probe_extent, sized to the connector) to measure HOW FAR it extends.
+    Using only the big probe for both would break on a thin wall: the big
+    probe is SUPPOSED to spill into empty space at a thin wall's edges
+    (that's what reveals the thickness), so requiring it to be "mostly
+    full" would wrongly reject the very walls this function exists to
+    measure."""
+    center = plane.point + plane.u * offset
+    if not _is_solidly_on_material(piece_a, center, min_width / 2) \
+            or not _is_solidly_on_material(piece_b, center, min_width / 2):
+        return None
+
+    probe = m3d.Manifold.cube([probe_extent, probe_extent, probe_extent], True).translate(list(center))
+    clipped_a = probe ^ piece_a
+    clipped_b = probe ^ piece_b
+
+    def span(clipped, axis_vec):
+        lo_x, lo_y, lo_z, hi_x, hi_y, hi_z = clipped.bounding_box()
+        lo, hi = np.array([lo_x, lo_y, lo_z]), np.array([hi_x, hi_y, hi_z])
+        idx = int(np.argmax(np.abs(axis_vec)))
+        return hi[idx] - lo[idx]
+
+    return min(span(clipped_a, plane.u), span(clipped_a, plane.v),
+               span(clipped_b, plane.u), span(clipped_b, plane.v))
+
+
+_FIT_FRACTIONS = (1.0, 0.75, 0.55, 0.4, 0.3, 0.2)
+
+
+def _fit_connector_size(piece_a, piece_b, plane: CutPlane, offset: float,
+                         params: ConnectorParams, min_width: float) -> Optional[ConnectorParams]:
+    """Find the largest size (as a fraction of `params`) that actually fits
+    as solid material at `offset`, by directly testing candidate sizes
+    against the real split geometry (the same proven sphere-probe,
+    fraction-of-volume check as _is_solidly_on_material) rather than
+    inferring a size from a bounding-box measurement -- see
+    apply_connector_instances' docstring for why that measurement approach
+    didn't hold up. Tries the full requested size first, shrinking through
+    fixed steps; returns None if nothing down to `min_width` fits."""
+    center = plane.point + plane.u * offset
+    for fraction in _FIT_FRACTIONS:
+        width = params.width * fraction
+        if width < min_width:
+            break
+        test_radius = width * 0.7
+        # A stricter fill fraction than _is_solidly_on_material's own 0.3
+        # default: that default distinguishes "on material at all" from
+        # "hollow" (0.5 vs 0.0, a wide gap). Here the question is "does
+        # THIS SIZE actually fit," and measured directly against a real
+        # thin wall, fill drops off smoothly as the tested size grows past
+        # what fits (0.50 comfortably embedded, ~0.34 already spilling
+        # past the wall) -- 0.3 would accept sizes visibly bigger than the
+        # wall itself, which is the exact "chunky" bug this exists to fix.
+        if _is_solidly_on_material(piece_a, center, test_radius, min_fill_fraction=0.45) \
+                and _is_solidly_on_material(piece_b, center, test_radius, min_fill_fraction=0.45):
+            return ConnectorParams(width=width, depth=params.depth * fraction, tolerance=params.tolerance)
+    return None
+
+
+def apply_connector_instances(piece_a, piece_b, plane: CutPlane, params: ConnectorParams,
+                               connector_fn: Callable[..., ConnectorResult],
+                               offsets: List[float], min_width: float = 3.0) -> ConnectorResult:
+    """Apply `connector_fn` once per offset along the seam's slide axis
+    (`plane.u`), chaining the boolean results so multiple connector
+    instances compound onto the same two pieces -- this is how "bigger
+    object, more connectors" is actually placed, not a new connector shape,
+    just the existing ones repeated at real, non-overlapping positions
+    (see core.geometry.suggest_connector_layout for how offsets are chosen).
+    Dowel's loose pins (one per instance) union into a single printable body
+    since a slicer handles multiple disjoint solids in one export fine --
+    each pin is translated by its own offset first, since apply_dowel builds
+    the pin in a position-independent local frame (it's a standalone print,
+    not attached to the seam); without that translation, two instances would
+    produce two perfectly-overlapping pins whose union silently collapses to
+    one pin's volume instead of two.
+
+    Each offset gets its OWN width/depth, shrunk to fit the real local
+    material there -- not `params` applied uniformly everywhere. Sized by
+    directly TESTING candidate sizes against the actual split geometry
+    (see _fit_connector_size), not by measuring an abstract "thickness"
+    and calculating backward from it: an earlier version did that with
+    local_wall_thickness's bounding-box reading, but a curved wall's
+    material extends further at some points within a probe's footprint
+    than directly at the connector's own center, inflating that reading
+    well past the wall's real thickness -- found live (a measured 16.5mm
+    on an actual 8mm-thick tube wall) after already having to fix the
+    measurement once for a DIFFERENT reason (a large probe wrapping
+    around to the opposite wall of a hollow shape entirely). Directly
+    testing "does a connector of this size actually fit" sidesteps both
+    failure modes instead of chasing a third fix to the measurement
+    approach. An offset with no size that fits at all (or no material to
+    begin with) is dropped entirely. If EVERY offset turns out unusable
+    this way, the honest answer is no connector at all, not forcing one
+    back onto a position already proven unfit."""
+    fitted: List[Tuple[float, ConnectorParams]] = []
+    for offset in offsets:
+        local_params = _fit_connector_size(piece_a, piece_b, plane, offset, params, min_width)
+        if local_params is not None:
+            fitted.append((offset, local_params))
+
+    if not fitted:
+        return ConnectorResult(piece_a=piece_a, piece_b=piece_b, loose_piece=None)
+
+    loose_pieces = []
+    for offset, local_params in fitted:
+        shifted_plane = CutPlane(
+            point=plane.point + plane.u * offset,
+            normal=plane.normal, u=plane.u, v=plane.v,
+        )
+        result = connector_fn(piece_a, piece_b, shifted_plane, local_params)
+        piece_a, piece_b = result.piece_a, result.piece_b
+        if result.loose_piece is not None:
+            loose_pieces.append(result.loose_piece.translate(list(plane.u * offset)))
+
+    loose = None
+    if loose_pieces:
+        loose = loose_pieces[0]
+        for extra in loose_pieces[1:]:
+            loose = loose + extra
+
+    return ConnectorResult(piece_a=piece_a, piece_b=piece_b, loose_piece=loose)

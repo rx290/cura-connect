@@ -9,7 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cura_plugin" / 
 from core.geometry import CutPlane, split_solid, is_watertight
 from core.connectors import (
     ConnectorParams, ConnectorResult,
-    apply_plug, apply_dowel, apply_dovetail, apply_snap,
+    apply_plug, apply_dowel, apply_dovetail, apply_snap, apply_connector_instances,
+    filter_offsets_on_solid_material, local_wall_thickness,
 )
 
 
@@ -211,4 +212,137 @@ def test_snap_partial_insertion_before_the_throat_shows_real_interference(split_
     assert overlap.volume() > 0.5, (
         "a peg not yet through the throat should show real interference -- "
         "if it doesn't, the throat isn't actually constricting anything"
+    )
+
+
+# ---------- Multiple connector instances (apply_connector_instances) ----------
+
+def test_multiple_connector_instances_stay_watertight(split_cube, params):
+    a, b, plane = split_cube
+    result = apply_connector_instances(a, b, plane, params, apply_plug, offsets=[-10.0, 0.0, 10.0])
+    assert is_watertight(result.piece_a)
+    assert is_watertight(result.piece_b)
+
+
+def test_three_connector_instances_add_more_material_than_one(split_cube, params):
+    a, b, plane = split_cube
+    single = apply_connector_instances(a, b, plane, params, apply_plug, offsets=[0.0])
+    triple = apply_connector_instances(a, b, plane, params, apply_plug, offsets=[-10.0, 0.0, 10.0])
+    assert triple.piece_a.volume() > single.piece_a.volume(), (
+        "three plug bosses should add noticeably more material than one -- "
+        "this is the real mechanism behind 'bigger object, more connectors'"
+    )
+
+
+def test_multiple_dowel_pins_union_into_one_watertight_loose_body(split_cube, params):
+    a, b, plane = split_cube
+    single = apply_connector_instances(a, b, plane, params, apply_dowel, offsets=[0.0])
+    double = apply_connector_instances(a, b, plane, params, apply_dowel, offsets=[-10.0, 10.0])
+    assert double.loose_piece is not None
+    assert is_watertight(double.loose_piece)
+    assert double.loose_piece.volume() > single.loose_piece.volume() * 1.5, (
+        "two disjoint pins unioned together should have roughly double the "
+        "volume of one -- not one pin's worth, which would mean the second "
+        "instance silently didn't get applied"
+    )
+
+
+# ---------- Hollow/thin-walled models (filter_offsets_on_solid_material) ----------
+# A real bug found via live testing on an actual hollow vase/lampshade model:
+# evenly spacing connectors across the seam's bounding-box span assumes a
+# solid cross-section. A hollow tube's seam is a ring (wall material only
+# near the outside), and a naive offset can land in the empty center where
+# there's nothing to attach a connector to.
+
+@pytest.fixture
+def split_hollow_tube():
+    """A tube, outer radius 20mm, inner radius 12mm (8mm wall), split flat
+    at mid-height -- the same real shape category as a vase or lampshade."""
+    outer = m3d.Manifold.cylinder(40, 20, 20, circular_segments=64)
+    inner = m3d.Manifold.cylinder(40, 12, 12, circular_segments=64)
+    tube = outer - inner
+    plane = CutPlane.from_normal(point=[0, 0, 20], normal=[0, 0, 1])
+    a, b = split_solid(tube, plane)
+    return a, b, plane
+
+
+def test_filter_offsets_removes_the_hollow_center_but_keeps_wall_positions(split_hollow_tube):
+    a, b, plane = split_hollow_tube
+    offsets = [0.0, 16.0, -16.0, 25.0]
+    valid = filter_offsets_on_solid_material(a, b, plane, offsets, probe_size=4.0)
+
+    assert 0.0 not in valid, "the hollow center has no wall to attach a connector to"
+    assert 25.0 not in valid, "this position is entirely outside the tube"
+    assert 16.0 in valid, "this position sits on the actual tube wall (12-20mm radius)"
+    assert -16.0 in valid, "this position sits on the actual tube wall (12-20mm radius)"
+
+
+def test_apply_connector_instances_skips_a_hollow_offset_instead_of_placing_it_in_empty_space(
+        split_hollow_tube, params):
+    a, b, plane = split_hollow_tube
+    # 0.0 (dead center, hollow) and 16.0 (real wall material) -- the hollow
+    # one should be silently dropped, not crash or produce a floating boss.
+    result = apply_connector_instances(a, b, plane, params, apply_plug, offsets=[0.0, 16.0])
+    assert is_watertight(result.piece_a)
+    assert is_watertight(result.piece_b)
+
+    center_only = apply_connector_instances(a, b, plane, params, apply_plug, offsets=[0.0])
+    # If the hollow offset had actually been applied, piece_a would gain a
+    # boss's worth of extra material; since it's dropped, this should be
+    # unchanged from just cutting with no connector at all.
+    assert np.isclose(center_only.piece_a.volume(), a.volume(), atol=1.0)
+
+
+# ---------- Adaptive sizing to the real local wall ----------
+# A second real bug found via the same live test on the hollow vase: even
+# once a connector avoided the hollow center, it was still sized from the
+# seam's overall bounding-box span (~150mm diameter) rather than the
+# actual wall thickness at that one spot (a few mm) -- producing a boss far
+# chunkier than the wall it was meant to attach to. apply_connector_
+# instances fixes this by directly TESTING candidate sizes against the
+# real geometry (_fit_connector_size), not by measuring an abstract
+# "thickness" and calculating backward from it -- local_wall_thickness
+# below is that earlier measurement approach, kept as a rough diagnostic,
+# but its bounding-box reading is measurably inflated by wall curvature
+# over the probe's footprint (a real, separate finding in its own right),
+# so it's no longer what actually sizes a connector.
+
+def test_local_wall_thickness_measures_the_wall_not_the_overall_diameter(split_hollow_tube):
+    a, b, plane = split_hollow_tube
+    # the tube's overall diameter is 40mm, but the wall itself is only 8mm
+    # thick (outer radius 20 - inner radius 12) -- the measurement should
+    # reflect the wall, not the diameter. probe_extent=25 (not, say, 60):
+    # too large a probe wraps clean across the 24mm hollow middle and picks
+    # up the opposite wall too, which is a real, separate bug in its own
+    # right. Even so, a curved wall's material within the probe's footprint
+    # inflates the reading well past the true 8mm -- 20.0 is a loose bound
+    # that still clearly distinguishes "thin wall" from "40mm diameter,"
+    # not a claim that this reading is precise (see _fit_connector_size for
+    # the approach that's actually robust enough to size a connector from).
+    thickness = local_wall_thickness(a, b, plane, offset=16.0, probe_extent=25.0)
+    assert thickness is not None
+    assert thickness < 20.0, f"expected a reading well under the 40mm diameter, got {thickness}"
+    assert thickness > 2.0
+
+
+def test_local_wall_thickness_is_none_in_the_hollow_center(split_hollow_tube):
+    a, b, plane = split_hollow_tube
+    assert local_wall_thickness(a, b, plane, offset=0.0, probe_extent=25.0) is None
+
+
+def test_apply_connector_instances_caps_an_oversized_width_to_fit_a_thin_wall(split_hollow_tube):
+    a, b, plane = split_hollow_tube
+    oversized = ConnectorParams(width=30.0, depth=20.0, tolerance=0.15)
+    fitted_small = ConnectorParams(width=6.0, depth=4.0, tolerance=0.15)
+
+    result = apply_connector_instances(a, b, plane, oversized, apply_plug, offsets=[16.0])
+    small = apply_connector_instances(a, b, plane, fitted_small, apply_plug, offsets=[16.0])
+    assert is_watertight(result.piece_a)
+    assert is_watertight(result.piece_b)
+
+    added_by_oversized = result.piece_a.volume() - a.volume()
+    added_by_small = small.piece_a.volume() - a.volume()
+    assert added_by_oversized < added_by_small * 3, (
+        "requesting a 30mm-wide connector on an 8mm wall should be capped down "
+        "close to what actually fits, not applied at the full requested (chunky) size"
     )

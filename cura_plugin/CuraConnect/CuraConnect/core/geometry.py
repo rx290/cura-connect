@@ -7,6 +7,7 @@ instead of silently producing a broken mesh) -- verified directly against
 the real library before this module was written, not assumed.
 """
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import manifold3d as m3d
@@ -19,6 +20,23 @@ def normalize(v):
     if length < 1e-9:
         raise ValueError(f"Cannot normalize a near-zero vector: {v}")
     return v / length
+
+
+def rotate_vector(v, axis, degrees):
+    """Rotate `v` by `degrees` around `axis` (Rodrigues' rotation formula).
+    Used to tilt a cut plane's normal away from a pure world axis by a
+    user-chosen angle, on top of the axis-aligned position the suggestion
+    heuristic picks -- the heuristic itself stays axis-aligned (tilting the
+    search space too would be a much bigger, separate undertaking); tilt is
+    a manual refinement applied on top of that base position."""
+    axis = normalize(axis)
+    v = np.array(v, dtype=float)
+    theta = np.radians(degrees)
+    return (
+        v * np.cos(theta)
+        + np.cross(axis, v) * np.sin(theta)
+        + axis * np.dot(axis, v) * (1 - np.cos(theta))
+    )
 
 
 @dataclass
@@ -118,3 +136,159 @@ def read_stl_as_manifold(path: str) -> m3d.Manifold:
     tri_verts = inverse.reshape(-1, 3).astype(np.uint32)
     mesh = m3d.Mesh(vert_properties=unique_verts.astype(np.float64), tri_verts=tri_verts)
     return m3d.Manifold(mesh)
+
+
+"""
+Cheap, deliberately approximate cross-section analysis, shared by the
+"suggest a cut position" and "size/count the connectors for this seam"
+features. Neither one does real polygon slicing against the mesh -- both
+sample raw vertices in a thin band around a candidate position, the same
+by-hand technique used to pick a safe cut location on the Eiffel Tower demo
+model (avoid the ornate lattice arches near its base, cut through the
+solid tapering mast instead). That's a real, useful heuristic, not a
+structural simulation -- it can be fooled by a model with genuinely thin
+walls that happen to have few vertices, and it says nothing about material
+strength. Documented here rather than oversold.
+"""
+
+
+@dataclass
+class CrossSectionInfo:
+    span_a: float       # footprint extent along axis_a_index, at this position
+    span_b: float       # footprint extent along axis_b_index, at this position
+    area: float         # span_a * span_b -- a bounding-box proxy, not a true polygon area
+    vertex_count: int
+    density: float       # vertex_count / area -- higher means more geometric detail per unit area
+
+
+def cross_section_footprint(vertices: np.ndarray, cut_axis_index: int, position: float,
+                             axis_a_index: int, axis_b_index: int,
+                             band_fraction: float = 0.02) -> Optional[CrossSectionInfo]:
+    """Sample vertices within a thin band around `position` along
+    `cut_axis_index` and report the footprint along `axis_a_index`/
+    `axis_b_index`. Returns None if too few vertices fall in the band (e.g.
+    `position` sits between two disjoint sub-parts, or right at a tip)."""
+    lo = float(vertices[:, cut_axis_index].min())
+    hi = float(vertices[:, cut_axis_index].max())
+    extent = hi - lo
+    if extent < 1e-6:
+        return None
+
+    band = max(extent * band_fraction, 1e-3)
+    mask = np.abs(vertices[:, cut_axis_index] - position) <= band
+    band_verts = vertices[mask]
+    if band_verts.shape[0] < 3:
+        return None
+
+    span_a = float(band_verts[:, axis_a_index].max() - band_verts[:, axis_a_index].min())
+    span_b = float(band_verts[:, axis_b_index].max() - band_verts[:, axis_b_index].min())
+    area = span_a * span_b
+    vertex_count = int(band_verts.shape[0])
+    density = vertex_count / max(area, 1e-6)
+    return CrossSectionInfo(span_a=span_a, span_b=span_b, area=area,
+                             vertex_count=vertex_count, density=density)
+
+
+def suggest_cut_position(vertices: np.ndarray, cut_axis_index: int, bed_limit: Optional[float] = None,
+                          n_samples: int = 40, margin_fraction: float = 0.08,
+                          lattice_density_multiple: float = 2.0) -> float:
+    """Score candidate positions along `cut_axis_index` and return the best
+    one. "Avoid a thin/lattice cross-section" is treated as a hard FILTER,
+    not a soft tiebreaker against raw area -- a real, empirically necessary
+    call: an early version scored area minus a density penalty, which let a
+    model's single widest point (often right near one end, e.g. a tapering
+    tower's base) dominate over everything else, defaulting to a barely-
+    trimmed sliver off one end. Filtering out candidates whose density
+    exceeds `lattice_density_multiple`x the median first, then ranking the
+    survivors mainly by closeness to the middle (bed-fit still wins when it
+    applies, area only breaks close ties), gives a far more useful default:
+    a roughly balanced split that still steers clear of genuinely thin or
+    highly-detailed regions."""
+    other = [i for i in range(3) if i != cut_axis_index]
+    lo = float(vertices[:, cut_axis_index].min())
+    hi = float(vertices[:, cut_axis_index].max())
+    extent = hi - lo
+    if extent < 1e-6:
+        raise ValueError("the model has no extent along the chosen cut axis")
+
+    margin = extent * margin_fraction
+    candidates = np.linspace(lo + margin, hi - margin, n_samples)
+    infos = [cross_section_footprint(vertices, cut_axis_index, p, other[0], other[1]) for p in candidates]
+    valid = [(p, info) for p, info in zip(candidates, infos) if info is not None]
+    if not valid:
+        return float(lo + extent / 2)
+
+    median_density = float(np.median([info.density for _, info in valid]))
+    threshold = median_density * lattice_density_multiple
+    safe = [(p, info) for p, info in valid if info.density <= threshold or median_density <= 1e-9]
+    if not safe:
+        safe = valid  # every candidate looked "dense" (e.g. a uniformly lattice-like model) -- don't strand ourselves
+
+    max_area = max(info.area for _, info in safe) or 1.0
+    mid = lo + extent / 2
+
+    best_p, best_score = float(safe[0][0]), -np.inf
+    for p, info in safe:
+        center_score = -abs(p - mid) / extent
+        area_tiebreak = (info.area / max_area) * 0.1
+
+        fit_score = 0.0
+        if bed_limit is not None:
+            piece_a_size = hi - p
+            piece_b_size = p - lo
+            if piece_a_size <= bed_limit and piece_b_size <= bed_limit:
+                fit_score = 1.0
+            else:
+                overflow = max(piece_a_size - bed_limit, 0.0) + max(piece_b_size - bed_limit, 0.0)
+                fit_score = -overflow / extent
+
+        score = center_score + area_tiebreak + 2.0 * fit_score
+        if score > best_score:
+            best_score, best_p = score, float(p)
+
+    return best_p
+
+
+@dataclass
+class ConnectorLayout:
+    width: float
+    depth: float
+    count: int
+    offsets: list  # positions along the plane's u axis, one per connector instance
+    seam_size: float = 0.0  # the seam's extent along u -- kept so a manual count override can respace
+
+
+def evenly_spaced_offsets(count: int, seam_size: float, usable_fraction: float = 0.7) -> list:
+    """`count` positions along a seam of extent `seam_size`, spread across
+    `usable_fraction` of it and centered on 0 -- shared by the automatic
+    layout below and by a manual connector-count override."""
+    if count <= 1:
+        return [0.0]
+    span = seam_size * usable_fraction
+    return [float(x) for x in np.linspace(-span / 2, span / 2, count)]
+
+
+def suggest_connector_layout(vertices: np.ndarray, cut_axis_index: int, position: float,
+                              u_axis_index: int, v_axis_index: int,
+                              base_width_fraction: float = 0.12, min_width: float = 4.0,
+                              max_width: float = 20.0, min_gap_factor: float = 2.5,
+                              max_count: int = 4) -> Optional[ConnectorLayout]:
+    """Size the connector to the actual seam, and decide how many evenly
+    spaced instances fit along it without crowding -- "bigger object, bigger
+    (and more) connectors", grounded in the real cross-section at the cut
+    rather than a fixed default. Returns None if the cross-section can't be
+    sampled here (see cross_section_footprint)."""
+    info = cross_section_footprint(vertices, cut_axis_index, position, u_axis_index, v_axis_index)
+    if info is None:
+        return None
+
+    width = float(np.clip(min(info.span_a, info.span_b) * base_width_fraction, min_width, max_width))
+    depth = width * 0.75
+    seam_u = info.span_a  # span along axis_a_index, which the caller passes as u_axis_index
+
+    spacing_needed = width * min_gap_factor
+    count = max(1, int(seam_u // spacing_needed)) if spacing_needed > 0 else 1
+    count = min(count, max_count)
+
+    return ConnectorLayout(width=width, depth=depth, count=count,
+                            offsets=evenly_spaced_offsets(count, seam_u), seam_size=seam_u)

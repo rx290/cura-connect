@@ -12,7 +12,6 @@ Item
     UM.I18nCatalog { id: catalog; name: "cura" }
 
     property var connectorTypes: ["dovetail", "plug", "dowel", "snap"]
-    property var axes: ["Y", "X", "Z"]
 
     Column
     {
@@ -21,7 +20,7 @@ Item
 
         UM.Label
         {
-            text: catalog.i18nc("@label", "Click or drag on the selected model to position the cut plane, then press Cut.")
+            text: catalog.i18nc("@label", "A cut plane is suggested automatically. Drag the model or a colored arrow to adjust it, click an arrow to change axis, dial in a tilt if you want an angled cut, then press Cut.")
             width: UM.Theme.getSize("setting_control").width * 2
             wrapMode: Text.WordWrap
         }
@@ -49,7 +48,7 @@ Item
 
         Row
         {
-            spacing: UM.Theme.getSize("default_margin").width
+            spacing: UM.Theme.getSize("narrow_margin").width
             UM.Label
             {
                 text: catalog.i18nc("@label", "Cut axis")
@@ -57,58 +56,90 @@ Item
                 height: UM.Theme.getSize("setting_control").height
                 verticalAlignment: Text.AlignVCenter
             }
-            ComboBox
+            UM.Label
             {
-                id: cutAxisCombo
-                width: UM.Theme.getSize("setting_control").width
+                text: UM.Controller.properties.getValue("CutAxis")
                 height: UM.Theme.getSize("setting_control").height
-                model: base.axes
-                currentIndex: base.axes.indexOf(UM.Controller.properties.getValue("CutAxis"))
-                onActivated: UM.Controller.setProperty("CutAxis", base.axes[currentIndex])
+                verticalAlignment: Text.AlignVCenter
+                font.bold: true
+            }
+            Rectangle { width: 12; height: 12; radius: 2; color: UM.Theme.getColor("x_axis"); anchors.verticalCenter: parent.verticalCenter }
+            UM.Label { text: "X"; height: UM.Theme.getSize("setting_control").height; verticalAlignment: Text.AlignVCenter }
+            Rectangle { width: 12; height: 12; radius: 2; color: UM.Theme.getColor("y_axis"); anchors.verticalCenter: parent.verticalCenter }
+            UM.Label { text: "Y"; height: UM.Theme.getSize("setting_control").height; verticalAlignment: Text.AlignVCenter }
+            Rectangle { width: 12; height: 12; radius: 2; color: UM.Theme.getColor("z_axis"); anchors.verticalCenter: parent.verticalCenter }
+            UM.Label { text: "Z"; height: UM.Theme.getSize("setting_control").height; verticalAlignment: Text.AlignVCenter }
+            UM.Label
+            {
+                text: catalog.i18nc("@label", "Tilt")
+                height: UM.Theme.getSize("setting_control").height
+                verticalAlignment: Text.AlignVCenter
+            }
+            UM.TextFieldWithUnit
+            {
+                id: tiltAngleField
+                width: UM.Theme.getSize("setting_control").width * 0.75
+                height: UM.Theme.getSize("setting_control").height
+                unit: "°"
+                text: UM.Controller.properties.getValue("TiltAngle")
+                validator: UM.FloatValidator { maxBeforeDecimal: 2; maxAfterDecimal: 1 }
+                onEditingFinished: UM.Controller.setProperty("TiltAngle", text.replace(",", "."))
             }
         }
 
         Row
         {
-            spacing: UM.Theme.getSize("default_margin").width
+            spacing: UM.Theme.getSize("narrow_margin").width
             UM.Label
             {
                 text: catalog.i18nc("@label", "Width")
-                width: UM.Theme.getSize("setting_control").width
+                width: UM.Theme.getSize("setting_control").width / 2
                 height: UM.Theme.getSize("setting_control").height
                 verticalAlignment: Text.AlignVCenter
             }
             UM.TextFieldWithUnit
             {
                 id: widthField
-                width: UM.Theme.getSize("setting_control").width
+                width: UM.Theme.getSize("setting_control").width * 0.75
                 height: UM.Theme.getSize("setting_control").height
                 unit: "mm"
                 text: UM.Controller.properties.getValue("Width")
                 validator: UM.FloatValidator { maxBeforeDecimal: 3; maxAfterDecimal: 2 }
                 onEditingFinished: UM.Controller.setProperty("Width", text.replace(",", "."))
             }
-        }
-
-        Row
-        {
-            spacing: UM.Theme.getSize("default_margin").width
             UM.Label
             {
                 text: catalog.i18nc("@label", "Depth")
-                width: UM.Theme.getSize("setting_control").width
+                width: UM.Theme.getSize("setting_control").width / 2
                 height: UM.Theme.getSize("setting_control").height
                 verticalAlignment: Text.AlignVCenter
             }
             UM.TextFieldWithUnit
             {
                 id: depthField
-                width: UM.Theme.getSize("setting_control").width
+                width: UM.Theme.getSize("setting_control").width * 0.75
                 height: UM.Theme.getSize("setting_control").height
                 unit: "mm"
                 text: UM.Controller.properties.getValue("Depth")
                 validator: UM.FloatValidator { maxBeforeDecimal: 3; maxAfterDecimal: 2 }
                 onEditingFinished: UM.Controller.setProperty("Depth", text.replace(",", "."))
+            }
+            UM.Label
+            {
+                text: catalog.i18nc("@label", "Count")
+                width: UM.Theme.getSize("setting_control").width / 2
+                height: UM.Theme.getSize("setting_control").height
+                verticalAlignment: Text.AlignVCenter
+            }
+            UM.TextFieldWithUnit
+            {
+                id: connectorCountField
+                width: UM.Theme.getSize("setting_control").width * 0.5
+                height: UM.Theme.getSize("setting_control").height
+                unit: ""
+                text: UM.Controller.properties.getValue("ConnectorCount")
+                validator: UM.FloatValidator { maxBeforeDecimal: 1; maxAfterDecimal: 0 }
+                onEditingFinished: UM.Controller.setProperty("ConnectorCount", text)
             }
         }
 
