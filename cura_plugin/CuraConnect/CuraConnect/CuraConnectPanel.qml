@@ -44,6 +44,18 @@ Item
                 currentIndex: base.connectorTypes.indexOf(UM.Controller.properties.getValue("ConnectorType"))
                 onActivated: UM.Controller.setProperty("ConnectorType", base.connectorTypes[currentIndex])
             }
+            CheckBox
+            {
+                id: vaseModeCheck
+                text: catalog.i18nc("@option:check", "Vase mode")
+                height: UM.Theme.getSize("setting_control").height
+                checked: UM.Controller.properties.getValue("VaseMode") == true
+                onClicked: UM.Controller.setProperty("VaseMode", checked)
+                hoverEnabled: true
+                ToolTip.visible: hovered
+                ToolTip.text: catalog.i18nc("@tooltip",
+                    "Size connectors for a single spiralized wall (Cura's Spiralize Outer Contour), read from this model's own wall line width, instead of the general seam-fitting search.")
+            }
         }
 
         Row

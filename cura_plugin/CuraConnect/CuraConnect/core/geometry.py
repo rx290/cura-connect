@@ -268,6 +268,21 @@ def evenly_spaced_offsets(count: int, seam_size: float, usable_fraction: float =
     return [float(x) for x in np.linspace(-span / 2, span / 2, count)]
 
 
+def connector_count_for_width(width: float, seam_size: float, min_gap_factor: float = 2.5,
+                               max_count: int = 4) -> int:
+    """How many evenly-spaced connector instances of `width` fit along a
+    seam of `seam_size` without crowding -- each needs roughly
+    `width * min_gap_factor` of clear space to itself. Shared by the
+    automatic layout below and by anything that computes its own width
+    independently (e.g. a vase-mode wall thickness) and needs a matching
+    count for that specific width, not the automatic one."""
+    if width <= 0:
+        return 1
+    spacing_needed = width * min_gap_factor
+    count = max(1, int(seam_size // spacing_needed)) if spacing_needed > 0 else 1
+    return min(count, max_count)
+
+
 def suggest_connector_layout(vertices: np.ndarray, cut_axis_index: int, position: float,
                               u_axis_index: int, v_axis_index: int,
                               base_width_fraction: float = 0.12, min_width: float = 4.0,
@@ -286,9 +301,7 @@ def suggest_connector_layout(vertices: np.ndarray, cut_axis_index: int, position
     depth = width * 0.75
     seam_u = info.span_a  # span along axis_a_index, which the caller passes as u_axis_index
 
-    spacing_needed = width * min_gap_factor
-    count = max(1, int(seam_u // spacing_needed)) if spacing_needed > 0 else 1
-    count = min(count, max_count)
+    count = connector_count_for_width(width, seam_u, min_gap_factor, max_count)
 
     return ConnectorLayout(width=width, depth=depth, count=count,
                             offsets=evenly_spaced_offsets(count, seam_u), seam_size=seam_u)

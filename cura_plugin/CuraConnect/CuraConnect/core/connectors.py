@@ -243,6 +243,147 @@ def local_wall_thickness(piece_a, piece_b, plane: CutPlane, offset: float,
                span(clipped_b, plane.u), span(clipped_b, plane.v))
 
 
+def _snap_offset_to_material(piece_a, piece_b, plane: CutPlane, target_offset: float,
+                              probe_radius: float, search_extent: float,
+                              step: float) -> Optional[float]:
+    """Find the nearest real offset to `target_offset` (searching outward
+    along plane.u in alternating +/- steps, closest first, out to
+    `search_extent`) where a probe reads genuinely solid in BOTH pieces.
+    Returns `target_offset` itself if it already qualifies, or None if
+    nothing solid turns up within range.
+
+    Needed because a straight, evenly-spaced offset guess -- computed from
+    the seam's vertex-bounding-box span, see core.geometry.suggest_
+    connector_layout -- assumes the wall sits exactly there. A real, organic
+    model doesn't: found live on wave_shade_v1.stl, an actual spiral-fluted
+    vase, where vase mode's guessed offset sat under 1mm short of the wall
+    (which only existed in a ~3mm-wide radial band at that angle, confirmed
+    by directly scanning fill fraction radius-by-radius at the same height/
+    angle). A tiny miss like that is invisible to a straight bounding-box
+    guess and fatal to a probe with zero tolerance for it -- vase mode's
+    probe is already necessarily small (scaled to the wall itself), so
+    without this search EVERY offset silently came back empty, not just an
+    edge case."""
+    center = plane.point + plane.u * target_offset
+    if _is_solidly_on_material(piece_a, center, probe_radius) \
+            and _is_solidly_on_material(piece_b, center, probe_radius):
+        return target_offset
+
+    n_steps = max(1, int(search_extent / step))
+    for i in range(1, n_steps + 1):
+        for delta in (i * step, -i * step):
+            candidate = target_offset + delta
+            center = plane.point + plane.u * candidate
+            if _is_solidly_on_material(piece_a, center, probe_radius) \
+                    and _is_solidly_on_material(piece_b, center, probe_radius):
+                return candidate
+    return None
+
+
+def _rotated_frame(plane: CutPlane, angle_degrees: float) -> CutPlane:
+    """A frame sharing `plane`'s point and normal, but with u/v rotated by
+    `angle_degrees` within the plane. Lets vase mode search and place a
+    connector along the ACTUAL local radial/tangential directions at any
+    angle around the seam, not just along the single straight line
+    `plane.u` itself defines -- a real, roughly round vase's wall runs all
+    the way around its circumference, not along one diameter."""
+    rad = np.radians(angle_degrees)
+    u = plane.u * np.cos(rad) + plane.v * np.sin(rad)
+    v = -plane.u * np.sin(rad) + plane.v * np.cos(rad)
+    return CutPlane(point=plane.point, normal=plane.normal, u=u, v=v)
+
+
+def _angular_distance(a: float, b: float) -> float:
+    d = abs(a - b) % 360.0
+    return min(d, 360.0 - d)
+
+
+def _find_vase_connector_frames(piece_a, piece_b, plane: CutPlane, count: int,
+                                 max_radius: float, probe_radius: float, half_length: float,
+                                 angle_step: float = 8.0,
+                                 radius_step: Optional[float] = None) -> List[CutPlane]:
+    """Search a full circle of angles around `plane.point` (not just the one
+    straight line `evenly_spaced_offsets` produces along `plane.u`) for
+    positions genuinely solid in both pieces, then greedily pick up to
+    `count` of them as angularly spread apart as possible.
+
+    Found live, on the real wave_shade_v1.stl (an actual spiral-fluted
+    vase): every offset `evenly_spaced_offsets` produces sits on the same
+    straight line through the model's center, i.e. only ever at angle 0 deg
+    or 180 deg -- so of 4 "evenly spaced" connectors, at most 2 could ever
+    land on real wall material no matter how good the positional search
+    along that line got, and the other 2 were always going to be either
+    deep in the hollow interior or off the model entirely. "More
+    connectors" only means anything if they're actually distributed around
+    the wall, which requires searching in more than one direction from the
+    center.
+
+    A center passing `_is_solidly_on_material` alone isn't enough: a real
+    wavy wall's material can run out tangentially well before its radial
+    thickness does -- found live, a connector centered dead-on the wall's
+    radial band still ran off the edge of that specific wave lobe and
+    poked into open air past the wall's tangential end. So each candidate
+    also gets checked `half_length` out to either side ALONG THE ARC (not a
+    straight-line offset in `frame.v`): a straight tangent line diverges
+    from any curved wall, even a perfectly uniform circular one, so testing
+    a literal straight offset would reject good positions on a plain round
+    vase too, not just a wavy one -- found live via a failing test on an
+    ordinary uniform-thickness cylindrical shell fixture, not just the
+    organic model. Converting `half_length` to an equivalent angular reach
+    (arc_length = radius * angle_in_radians) and re-checking at the SAME
+    radius but a nearby angle follows the actual curve instead. (Radial
+    bulge -- the connector's width being wider than the wall's own thin
+    cross-section -- is a separate, expected thing: any connector thick
+    enough to print reliably on a sub-1mm wall inherently straddles past
+    both of the wall's faces a little, the way a boss or rivet head does on
+    a thin sheet; only the tangential run is actually variable per-lobe and
+    worth rejecting on.)
+
+    `radius_step` scales with `probe_radius`, not a fixed mm value: a
+    vase-mode wall is routinely under 1mm thick, so a step coarser than the
+    wall itself can step clean over it at every single angle -- a fixed
+    step tuned for an ordinary 8mm+ connector would silently find nothing
+    on a real 0.4mm single wall."""
+    radius_step = radius_step or max(probe_radius * 0.5, 0.1)
+    hits = []
+    for angle in np.arange(0.0, 360.0, angle_step):
+        frame = _rotated_frame(plane, float(angle))
+        r = radius_step
+        while r <= max_radius:
+            center = frame.point + frame.u * r
+            if _is_solidly_on_material(piece_a, center, probe_radius) \
+                    and _is_solidly_on_material(piece_b, center, probe_radius):
+                reach_degrees = np.degrees(half_length / r) if r > 1e-6 else 0.0
+                side_ok = True
+                for side in (reach_degrees, -reach_degrees):
+                    side_frame = _rotated_frame(plane, float(angle) + side)
+                    side_center = side_frame.point + side_frame.u * r
+                    if not (_is_solidly_on_material(piece_a, side_center, probe_radius)
+                            and _is_solidly_on_material(piece_b, side_center, probe_radius)):
+                        side_ok = False
+                        break
+                if side_ok:
+                    hits.append((float(angle), float(r)))
+                    break
+            r += radius_step
+    if not hits:
+        return []
+
+    chosen = [hits[0]]
+    remaining = hits[1:]
+    while len(chosen) < count and remaining:
+        best = max(remaining, key=lambda h: min(_angular_distance(h[0], c[0]) for c in chosen))
+        chosen.append(best)
+        remaining.remove(best)
+
+    frames = []
+    for angle, radius in chosen:
+        frame = _rotated_frame(plane, angle)
+        frames.append(CutPlane(point=frame.point + frame.u * radius, normal=frame.normal,
+                                u=frame.u, v=frame.v))
+    return frames
+
+
 _FIT_FRACTIONS = (1.0, 0.75, 0.55, 0.4, 0.3, 0.2)
 
 
@@ -278,7 +419,8 @@ def _fit_connector_size(piece_a, piece_b, plane: CutPlane, offset: float,
 
 def apply_connector_instances(piece_a, piece_b, plane: CutPlane, params: ConnectorParams,
                                connector_fn: Callable[..., ConnectorResult],
-                               offsets: List[float], min_width: float = 3.0) -> ConnectorResult:
+                               offsets: List[float], min_width: float = 3.0,
+                               vase_mode: bool = False) -> ConnectorResult:
     """Apply `connector_fn` once per offset along the seam's slide axis
     (`plane.u`), chaining the boolean results so multiple connector
     instances compound onto the same two pieces -- this is how "bigger
@@ -310,26 +452,86 @@ def apply_connector_instances(piece_a, piece_b, plane: CutPlane, params: Connect
     approach. An offset with no size that fits at all (or no material to
     begin with) is dropped entirely. If EVERY offset turns out unusable
     this way, the honest answer is no connector at all, not forcing one
-    back onto a position already proven unfit."""
-    fitted: List[Tuple[float, ConnectorParams]] = []
-    for offset in offsets:
-        local_params = _fit_connector_size(piece_a, piece_b, plane, offset, params, min_width)
-        if local_params is not None:
-            fitted.append((offset, local_params))
+    back onto a position already proven unfit.
+
+    `vase_mode=True` skips that shrink-and-test search entirely and uses
+    `params` exactly as given at every accepted position instead. It exists
+    for a genuinely different situation: a model meant to print in Cura's
+    "Spiralize Outer Contour" mode is a known, fixed-thickness single wall
+    (typically under 1mm), not an unknown thickness to be discovered by
+    shrinking a guess. The shrink-and-test search's own probe sizes are
+    tuned around ordinary connector dimensions (3mm+) and would either
+    reject a legitimately-sized vase-mode connector outright or waste many
+    probe calls shrinking toward a size the caller already knows in
+    advance. The caller (CuraConnectTool) is expected to have already sized
+    `params` from Cura's real per-object wall_line_width_0/magic_spiralize
+    settings before calling this -- not guessed here.
+
+    Rather than reusing `offsets` as positions (see _find_vase_connector_
+    frames' docstring for why a straight line through the center only ever
+    reaches two opposite angles), vase mode searches a full circle around
+    `plane.point` for real wall material and picks `len(offsets)` positions
+    spread around it -- each also checked tangentially (does the wall
+    keep going far enough sideways to fit the connector's actual length,
+    not just at its own center point), since a real wavy wall's material
+    can run out in that direction well before its radial thickness does."""
+    if vase_mode:
+        # min_width (an "ordinary connector" floor, 3mm by default) has no
+        # business capping this probe from below -- a vase-mode wall is
+        # routinely well under that, and maxing against it would swamp the
+        # probe past the wall's own thickness, making even a position
+        # genuinely on the wall read as "not solidly on material."
+        probe_radius = params.depth / 2
+        count = max(len(offsets), 1)
+
+        # A generous outer bound for the radial search: prefer the existing
+        # straight-line offsets' own magnitude (cheap, and already roughly
+        # right) with headroom for a wall that turns out to sit a bit
+        # further out than that guess -- but a single centered connector
+        # request (evenly_spaced_offsets always returns [0.0] for count<=1)
+        # gives a useless zero-radius bound, so fall back to the real
+        # geometry's own extent in that case instead of searching nothing.
+        offset_radius = max((abs(o) for o in offsets), default=0.0)
+        if offset_radius > 1e-6:
+            max_radius = offset_radius * 1.3
+        else:
+            lo_x, lo_y, lo_z, hi_x, hi_y, hi_z = (piece_a + piece_b).bounding_box()
+            extent = np.array([hi_x - lo_x, hi_y - lo_y, hi_z - lo_z])
+            max_radius = float(np.max(extent)) * 0.75
+
+        # A generic proxy for "how far the connector's own footprint runs
+        # tangentially": matches apply_dovetail's default tail_length
+        # (width * 3) exactly, and is a reasonably conservative stand-in
+        # for the square width x width footprint the other connector types
+        # use (checking a bit further than their actual half-width is
+        # needed).
+        half_length = params.width * 1.5
+
+        candidates = _find_vase_connector_frames(
+            piece_a, piece_b, plane, count=max(count * 3, count + 4),
+            max_radius=max_radius, probe_radius=probe_radius, half_length=half_length,
+        )
+        fitted: List[Tuple[CutPlane, ConnectorParams]] = [(frame, params) for frame in candidates[:count]]
+    else:
+        fitted = []
+        for offset in offsets:
+            local_params = _fit_connector_size(piece_a, piece_b, plane, offset, params, min_width)
+            if local_params is not None:
+                shifted_plane = CutPlane(
+                    point=plane.point + plane.u * offset,
+                    normal=plane.normal, u=plane.u, v=plane.v,
+                )
+                fitted.append((shifted_plane, local_params))
 
     if not fitted:
         return ConnectorResult(piece_a=piece_a, piece_b=piece_b, loose_piece=None)
 
     loose_pieces = []
-    for offset, local_params in fitted:
-        shifted_plane = CutPlane(
-            point=plane.point + plane.u * offset,
-            normal=plane.normal, u=plane.u, v=plane.v,
-        )
-        result = connector_fn(piece_a, piece_b, shifted_plane, local_params)
+    for frame, local_params in fitted:
+        result = connector_fn(piece_a, piece_b, frame, local_params)
         piece_a, piece_b = result.piece_a, result.piece_b
         if result.loose_piece is not None:
-            loose_pieces.append(result.loose_piece.translate(list(plane.u * offset)))
+            loose_pieces.append(result.loose_piece.translate(list(frame.point - plane.point)))
 
     loose = None
     if loose_pieces:

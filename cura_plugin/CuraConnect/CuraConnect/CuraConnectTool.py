@@ -54,7 +54,7 @@ from cura.Scene.BuildPlateDecorator import BuildPlateDecorator
 
 from .core.geometry import (
     CutPlane, split_solid, suggest_cut_position, suggest_connector_layout, evenly_spaced_offsets,
-    rotate_vector,
+    rotate_vector, connector_count_for_width,
 )
 from .core.connectors import (
     ConnectorParams, apply_plug, apply_dowel, apply_dovetail, apply_snap, apply_connector_instances,
@@ -128,6 +128,7 @@ class CuraConnectTool(Tool):
         self._connector_count = 1
         self._connector_offsets = [0.0]
         self._seam_size = 0.0  # last-computed seam extent along u, needed to respace a manual count override
+        self._vase_mode = False  # size for a known-thin single wall instead of the general fit-search
 
         self.setHandle(CutAxisToolHandle())
         self._drag_mode = None  # "axis" (arrow) or "tilt" (ring) -- both share UM.Tool's single drag-plane slot
@@ -136,7 +137,7 @@ class CuraConnectTool(Tool):
 
         self.setExposedProperties(
             "ConnectorType", "Width", "Depth", "Tolerance", "CutAxis",
-            "PlanePosition", "PlaneSize", "ConnectorCount", "TiltAngle",
+            "PlanePosition", "PlaneSize", "ConnectorCount", "TiltAngle", "VaseMode",
         )
 
     def event(self, event):
@@ -248,7 +249,7 @@ class CuraConnectTool(Tool):
         if node is not None:
             mesh_data = node.getMeshData()
             if mesh_data is not None:
-                self._updateConnectorLayout(self._worldVertices(node, mesh_data))
+                self._updateConnectorLayout(node, self._worldVertices(node, mesh_data))
             self._renderPlane(node)
         self.propertyChanged.emit()
 
@@ -327,6 +328,26 @@ class CuraConnectTool(Tool):
         value = stack.getProperty(_MACHINE_DIM_FOR_AXIS[self._cut_axis], "value")
         return float(value) if value is not None else None
 
+    @staticmethod
+    def _currentWallThickness(node: CuraSceneNode) -> float:
+        """The real single-wall thickness Cura will actually print for this
+        model in "Spiralize Outer Contour" (vase) mode -- read directly from
+        Cura's own per-object setting stack (falling back to the global
+        stack automatically, the same `node.callDecoration("getStack")`
+        pattern Cura's own BuildVolume/PreviewPass code uses), not guessed.
+        Cura's own fdmprinter.def.json defines vase mode's wall_thickness as
+        exactly `wall_line_width_0` (wall_line_count is forced to 1), so
+        that's the one real setting this needs, regardless of whether
+        magic_spiralize happens to be toggled on for this model right now."""
+        default_mm = 0.4  # a common single-nozzle line width, used only if the stack can't be read at all
+        stack = node.callDecoration("getStack")
+        if stack is None:
+            return default_mm
+        value = stack.getProperty("wall_line_width_0", "value")
+        if value is None:
+            value = stack.getProperty("line_width", "value")
+        return float(value) if value else default_mm
+
     def _autoSuggestPlane(self, node: CuraSceneNode) -> None:
         """Called when the tool activates or the selection changes: places
         a smart default plane (avoiding thin/lattice cross-sections, and
@@ -350,13 +371,18 @@ class CuraConnectTool(Tool):
             self._plane_size = max(bbox.width, bbox.height, bbox.depth) * 1.4
             self._handle.setReach(max(bbox.width, bbox.height, bbox.depth) / 2)
 
-        self._updateConnectorLayout(world_verts)
+        self._updateConnectorLayout(node, world_verts)
         self._renderPlane(node)
         self.propertyChanged.emit()
 
-    def _updateConnectorLayout(self, world_verts: np.ndarray) -> None:
+    def _updateConnectorLayout(self, node: CuraSceneNode, world_verts: np.ndarray) -> None:
         """Size and count the connectors to the actual seam at the current
-        plane position -- "bigger object, bigger (and more) connectors"."""
+        plane position -- "bigger object, bigger (and more) connectors" --
+        unless vase mode is on, in which case width/depth come from Cura's
+        own real wall_line_width_0 setting instead (see
+        _currentWallThickness): a vase-mode print is a known, fixed-thickness
+        single wall, not something to size from the model's overall
+        cross-section the way a solid or generally-hollow object is."""
         axis_index = _AXIS_INDEX[self._cut_axis]
         u, v = _INDICATOR_AXES[self._cut_axis]
         u_axis_index = int(np.argmax(np.abs(u)))
@@ -366,11 +392,27 @@ class CuraConnectTool(Tool):
         )
         if layout is None:
             return
-        self._width = layout.width
-        self._depth = layout.depth
-        self._connector_count = layout.count
-        self._connector_offsets = layout.offsets
         self._seam_size = layout.seam_size
+
+        if self._vase_mode:
+            wall = self._currentWallThickness(node)
+            # deliberately not the same 0.6x/0.5x-of-thickness fractions
+            # apply_connector_instances' ordinary path uses -- those assume
+            # an unknown thickness being discovered by shrinking, not a
+            # known-in-advance one. Width is a printable footprint scaled
+            # to the wall (thin walls still want a compact connector, not
+            # an ordinary 4-20mm one); depth deliberately exceeds the wall
+            # itself so it punches cleanly through rather than stopping
+            # partway into a shell too thin to hold a blind recess at all.
+            self._width = max(wall * 6.0, 1.5)
+            self._depth = max(wall * 1.5, 0.4)
+            self._connector_count = connector_count_for_width(self._width, self._seam_size)
+            self._connector_offsets = evenly_spaced_offsets(self._connector_count, self._seam_size)
+        else:
+            self._width = layout.width
+            self._depth = layout.depth
+            self._connector_count = layout.count
+            self._connector_offsets = layout.offsets
 
     def _placePlane(self, node: CuraSceneNode, picked_position) -> None:
         axis_index = _AXIS_INDEX[self._cut_axis]
@@ -386,7 +428,7 @@ class CuraConnectTool(Tool):
 
         mesh_data = node.getMeshData()
         if mesh_data is not None:
-            self._updateConnectorLayout(self._worldVertices(node, mesh_data))
+            self._updateConnectorLayout(node, self._worldVertices(node, mesh_data))
 
         self._renderPlane(node)
         self.propertyChanged.emit()
@@ -457,7 +499,8 @@ class CuraConnectTool(Tool):
         connector_fn = _CONNECTOR_FUNCTIONS[self._connector_type]
         params = ConnectorParams(width=self._width, depth=self._depth, tolerance=self._tolerance)
         try:
-            result = apply_connector_instances(a, b, plane, params, connector_fn, self._connector_offsets)
+            result = apply_connector_instances(a, b, plane, params, connector_fn, self._connector_offsets,
+                                                vase_mode=self._vase_mode)
         except ValueError as e:
             Logger.log("e", f"CuraConnectTool: connector geometry rejected these parameters: {e}")
             return
@@ -579,7 +622,7 @@ class CuraConnectTool(Tool):
             if node is not None:
                 mesh_data = node.getMeshData()
                 if mesh_data is not None:
-                    self._updateConnectorLayout(self._worldVertices(node, mesh_data))
+                    self._updateConnectorLayout(node, self._worldVertices(node, mesh_data))
                 self._renderPlane(node)
             self.propertyChanged.emit()
 
@@ -604,4 +647,19 @@ class CuraConnectTool(Tool):
         if value != self._connector_count:
             self._connector_count = value
             self._connector_offsets = evenly_spaced_offsets(value, self._seam_size)
+            self.propertyChanged.emit()
+
+    def getVaseMode(self) -> bool:
+        return self._vase_mode
+
+    def setVaseMode(self, value) -> None:
+        value = bool(value)
+        if value != self._vase_mode:
+            self._vase_mode = value
+            if self._has_plane:
+                node = Selection.getSelectedObject(0)
+                if node is not None:
+                    mesh_data = node.getMeshData()
+                    if mesh_data is not None:
+                        self._updateConnectorLayout(node, self._worldVertices(node, mesh_data))
             self.propertyChanged.emit()

@@ -10,7 +10,7 @@ from core.geometry import CutPlane, split_solid, is_watertight
 from core.connectors import (
     ConnectorParams, ConnectorResult,
     apply_plug, apply_dowel, apply_dovetail, apply_snap, apply_connector_instances,
-    filter_offsets_on_solid_material, local_wall_thickness,
+    filter_offsets_on_solid_material, local_wall_thickness, _snap_offset_to_material,
 )
 
 
@@ -345,4 +345,143 @@ def test_apply_connector_instances_caps_an_oversized_width_to_fit_a_thin_wall(sp
     assert added_by_oversized < added_by_small * 3, (
         "requesting a 30mm-wide connector on an 8mm wall should be capped down "
         "close to what actually fits, not applied at the full requested (chunky) size"
+    )
+
+
+# ---------- Vase mode (apply_connector_instances(..., vase_mode=True)) ----------
+# A genuinely thin single wall (Cura's "Spiralize Outer Contour"), not just a
+# thicker hollow object -- the shrink-and-test search above is tuned around
+# ordinary connector sizes and would either reject a real vase-mode-scale
+# connector or waste effort shrinking toward a size already known in advance.
+
+@pytest.fixture
+def split_thin_shell():
+    """A single-wall shell, outer radius 20mm, wall 0.4mm (a real single
+    0.4mm-nozzle line width), split flat at mid-height."""
+    outer = m3d.Manifold.cylinder(40, 20, 20, circular_segments=64)
+    inner = m3d.Manifold.cylinder(40, 19.6, 19.6, circular_segments=64)
+    shell = outer - inner
+    plane = CutPlane.from_normal(point=[0, 0, 20], normal=[0, 0, 1])
+    a, b = split_solid(shell, plane)
+    return a, b, plane
+
+
+def test_vase_mode_uses_the_requested_size_as_given_not_shrunk(split_thin_shell):
+    a, b, plane = split_thin_shell
+    # sized for the real 0.4mm wall, not an ordinary connector's 8mm default
+    vase_params = ConnectorParams(width=4.0, depth=0.5, tolerance=0.1)
+    on_wall = 19.8  # solid from radius 19.6 to 20 -- 0.0 would be the hollow core
+
+    result = apply_connector_instances(a, b, plane, vase_params, apply_plug, offsets=[on_wall],
+                                        vase_mode=True)
+    assert is_watertight(result.piece_a)
+    assert is_watertight(result.piece_b)
+
+    # the ordinary (non-vase-mode) path would shrink this same request down
+    # through _FIT_FRACTIONS on a wall this thin -- vase_mode should not.
+    shrunk = apply_connector_instances(a, b, plane, vase_params, apply_plug, offsets=[on_wall],
+                                        vase_mode=False)
+    added_vase_mode = result.piece_a.volume() - a.volume()
+    added_shrunk = shrunk.piece_a.volume() - a.volume()
+    assert added_vase_mode > added_shrunk, (
+        "vase_mode=True should apply the connector at its full requested size, "
+        "not shrunk the way the ordinary fit-search would on a wall this thin"
+    )
+
+
+def test_vase_mode_finds_the_wall_even_when_the_offset_hint_points_at_the_hollow_center(split_thin_shell):
+    """`offsets` is only a count + rough-radius HINT for vase mode now (see
+    _find_vase_connector_frames) -- real positions come from searching the
+    whole seam, not from testing the literal offset value. So even a hint
+    of 0.0 (this shell's hollow core, inner radius 19.6) should still find
+    and use the real wall elsewhere on the seam, not give up because the
+    hint itself missed."""
+    a, b, plane = split_thin_shell
+    vase_params = ConnectorParams(width=4.0, depth=0.5, tolerance=0.1)
+
+    on_wall = apply_connector_instances(a, b, plane, vase_params, apply_plug, offsets=[19.8],
+                                         vase_mode=True)
+    assert is_watertight(on_wall.piece_a)
+    assert is_watertight(on_wall.piece_b)
+    assert on_wall.piece_a.volume() > a.volume(), (
+        "offset 19.8 sits ON the thin wall (solid from radius 19.6 to 20) -- "
+        "a real connector should have been applied"
+    )
+
+    hollow_hint = apply_connector_instances(a, b, plane, vase_params, apply_plug, offsets=[0.0],
+                                             vase_mode=True)
+    assert hollow_hint.piece_a.volume() > a.volume(), (
+        "offset 0.0 is only a HINT (count=1, no useful radius) -- vase mode "
+        "should still find the real wall by searching the seam, not fail "
+        "just because the hint itself sat in the hollow core"
+    )
+
+
+def test_vase_mode_drops_everything_when_nothing_on_the_seam_fits_at_all(split_thin_shell):
+    """A genuinely unusable request -- a probe far too big for this 0.4mm
+    wall to ever pass `_is_solidly_on_material` for -- should still come
+    back with no connector at all, not force one onto a position already
+    proven unfit."""
+    a, b, plane = split_thin_shell
+    impossible_params = ConnectorParams(width=4.0, depth=40.0, tolerance=0.1)
+
+    result = apply_connector_instances(a, b, plane, impossible_params, apply_plug, offsets=[19.8],
+                                        vase_mode=True)
+    assert np.isclose(result.piece_a.volume(), a.volume(), atol=1.0), (
+        "a probe this large can't read 'solid' anywhere on a 0.4mm wall -- "
+        "should be dropped, not applied anyway"
+    )
+
+
+# ---------- Snapping to the real wall on a near-miss offset ----------
+# A real bug found live on the actual wave_shade_v1.stl model (a spiral-
+# fluted vase): its wall isn't a clean, constant-radius ring -- evenly
+# spacing offsets across the seam's vertex-bounding-box span put every
+# single one of them under 1mm short of where the wall actually was at that
+# angle (confirmed by scanning fill fraction radius-by-radius), so vase mode
+# dropped every connector, not just a hollow-center edge case. Fixed by
+# _snap_offset_to_material searching outward from each guessed offset for
+# the nearest spot that's actually solid, instead of testing the guess at
+# face value.
+
+def test_snap_offset_to_material_returns_the_target_when_already_on_the_wall(split_thin_shell):
+    a, b, plane = split_thin_shell
+    snapped = _snap_offset_to_material(a, b, plane, target_offset=19.8, probe_radius=0.2,
+                                        search_extent=5.0, step=0.1)
+    assert snapped == 19.8
+
+
+def test_snap_offset_to_material_finds_the_wall_when_the_guess_is_a_near_miss(split_thin_shell):
+    """19.0 is a plausible bounding-box-derived guess that's actually just
+    short of this shell's wall (solid only from radius 19.6 to 20) -- the
+    exact shape of the real bug on wave_shade_v1.stl."""
+    a, b, plane = split_thin_shell
+    snapped = _snap_offset_to_material(a, b, plane, target_offset=19.0, probe_radius=0.2,
+                                        search_extent=5.0, step=0.1)
+    assert snapped is not None
+    assert 19.5 <= snapped <= 20.0
+
+
+def test_snap_offset_to_material_gives_up_past_search_extent(split_thin_shell):
+    a, b, plane = split_thin_shell
+    # 0.0 is the hollow core, over 19mm from the actual wall -- far outside
+    # any reasonable search window, so this should stay unplaced rather than
+    # wander off to the wall anyway.
+    snapped = _snap_offset_to_material(a, b, plane, target_offset=0.0, probe_radius=0.2,
+                                        search_extent=5.0, step=0.1)
+    assert snapped is None
+
+
+def test_vase_mode_snaps_a_near_miss_offset_onto_the_real_wall(split_thin_shell):
+    a, b, plane = split_thin_shell
+    vase_params = ConnectorParams(width=4.0, depth=0.5, tolerance=0.1)
+
+    near_miss = apply_connector_instances(a, b, plane, vase_params, apply_plug, offsets=[19.0],
+                                           vase_mode=True)
+    assert is_watertight(near_miss.piece_a)
+    assert is_watertight(near_miss.piece_b)
+    assert near_miss.piece_a.volume() > a.volume(), (
+        "offset 19.0 is a near-miss just short of the actual wall (19.6-20) -- "
+        "vase mode should snap to the nearby real wall material, not drop it "
+        "the way a plain positional check would"
     )

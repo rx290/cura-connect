@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cura_plugin" / 
 from core.geometry import (
     CutPlane, split_solid, place, is_watertight, write_stl, read_stl_as_manifold, normalize,
     cross_section_footprint, suggest_cut_position, suggest_connector_layout, evenly_spaced_offsets,
-    rotate_vector,
+    rotate_vector, connector_count_for_width,
 )
 
 
@@ -227,3 +227,21 @@ def test_rotate_vector_stays_perpendicular_to_its_rotation_axis_component():
     axis = normalize([0, 1, 0])
     v = rotate_vector([1, 0, 0], axis=axis, degrees=25)
     assert np.isclose(np.dot(v, axis), 0, atol=1e-9)
+
+
+# ---------- connector_count_for_width ----------
+
+def test_connector_count_for_width_fits_more_of_a_narrower_connector():
+    seam = 100.0
+    narrow_count = connector_count_for_width(2.0, seam)   # a vase-mode-scale connector
+    wide_count = connector_count_for_width(15.0, seam)    # an ordinary-scale connector
+    assert narrow_count > wide_count, "a narrower connector should fit more instances on the same seam"
+
+
+def test_connector_count_for_width_never_exceeds_max_count():
+    assert connector_count_for_width(0.5, 1000.0, max_count=4) == 4
+
+
+def test_connector_count_for_width_is_at_least_one():
+    assert connector_count_for_width(50.0, 10.0) == 1
+    assert connector_count_for_width(0.0, 100.0) == 1

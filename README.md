@@ -53,7 +53,7 @@ Select a model and activate the tool. A plane is suggested automatically, along 
 
 Dragging the ring (or typing directly into the Tilt field) tilts the plane on top of whichever axis is active — useful for a cut that isn't flat, without needing a full 3D rotation gizmo.
 
-<img src="docs/images/03-after-cut.png" width="700" alt="The model after Cut: two pieces with dovetail connectors visible at the seam">
+<img src="docs/images/03-after-cut.png" width="700" alt="Two pieces after Cut, separated to show the dovetail socket cut into the seam">
 
 Pressing Cut replaces the original model with two new pieces (visible in the object list as `_A`/`_B`), with connector geometry already applied at the seam.
 
