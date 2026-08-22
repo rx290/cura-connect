@@ -83,7 +83,11 @@ python3 -m venv .venv
 
 ## Installing the real Cura plugin
 
-Copy `cura_plugin/CuraConnect/CuraConnect/` into your Cura plugins folder (Help → Show Configuration Folder → `plugins/CuraConnect/CuraConnect/`), restart Cura, and look for the tool at the bottom of the left toolbar (a chain-link icon, shortcut `J`). Select a model and activate the tool — see [Usage](#usage) above for the full walkthrough with screenshots.
+**One-click installer:** run `installer/install.py` (or double-click `installer/install.command` on macOS, `installer/Install.bat` on Windows, `installer/install.sh` on Linux). It finds your Cura installation on its own, on any of the three OSes, and drops the plugin into the right folder, no manual folder-hunting required. It's still in the repo, not on the Marketplace yet since that submission is still under review, but it does the same job the Marketplace's one-click install will do once that's approved.
+
+Restart Cura afterward and look for the tool at the bottom of the left toolbar (a chain-link icon, shortcut `J`). Select a model and activate the tool, see [Usage](#usage) above for the full walkthrough with screenshots.
+
+**Manual install**, if you'd rather do it by hand: copy `cura_plugin/CuraConnect/CuraConnect/` into your Cura plugins folder (Help → Show Configuration Folder → `plugins/CuraConnect/CuraConnect/`).
 
 ## Trying the headless engine directly (no Cura install needed)
 
