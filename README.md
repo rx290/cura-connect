@@ -57,7 +57,7 @@ Dragging the ring (or typing directly into the Tilt field) tilts the plane on to
 
 Pressing Cut replaces the original model with two new pieces (visible in the object list as `_A`/`_B`), with connector geometry already applied at the seam.
 
-## The five connectors
+## The seven connectors
 
 | Type | How it works | Assembly |
 |---|---|---|
@@ -66,6 +66,8 @@ Pressing Cut replaces the original model with two new pieces (visible in the obj
 | **Snap** | A peg with a bulbous tip into a socket with a narrower throat | Push past the throat (needs real material flex — see the honesty note below) |
 | **Dovetail** | A trapezoidal tail, narrow at the seam and wider at depth | Slide along the joint's length — cannot be pulled straight apart |
 | **Twist** | A round boss with three lugs into a socket with L-shaped slots (same joint Lamp Studio uses when it splits a part for the bed) | Push together a third of a turn off, twist back into line; locked until you twist it back |
+| **Thread** | A threaded stud on one piece, the matching threaded hole in the other (3 mm pitch, coarse enough to print upright) | Screw together |
+| **Squeeze** | A hollow boss slotted into four springy fingers with hooks, into a bore with a groove behind its shoulder | Pinch the fingers, push in, let go: the hooks spring into the groove. Pinch to undo (same flex honesty note as Snap) |
 
 **Honest limitation on Snap:** this project follows the same rule Lumeforge already established — don't fake a flex-dependent joint's real-world behavior. The Snap connector's automated tests can prove the *locked* state is collision-free and that the throat is genuinely narrower than the bulb (so it isn't a snap in name only), but they cannot simulate whether your actual filament/wall thickness will flex enough to assemble it. That depends on your printer and material, not on this geometry alone.
 

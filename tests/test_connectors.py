@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cura_plugin" / 
 from core.geometry import CutPlane, split_solid, is_watertight
 from core.connectors import (
     ConnectorParams, ConnectorResult,
-    apply_plug, apply_dowel, apply_dovetail, apply_snap, apply_twist, apply_connector_instances,
+    apply_plug, apply_dowel, apply_dovetail, apply_snap, apply_twist, apply_thread, apply_squeeze, apply_connector_instances,
     filter_offsets_on_solid_material, local_wall_thickness, _snap_offset_to_material,
 )
 
@@ -510,3 +510,44 @@ def test_twist_locks_until_turned(split_cube):
         return (r.piece_a.rotate((0, 0, rot)).translate(tuple(apart * n)) ^ r.piece_b).volume()
     assert clash(0) > 1.0
     assert min(clash(-30.0), clash(30.0)) < 1e-3
+
+
+# ---------- Thread (screw) ----------
+
+def _apart(result, plane):
+    n = np.asarray(plane.normal, float)
+    bb = result.piece_a.bounding_box()
+    return n, (1.0 if np.dot(np.asarray(bb[:3]) + np.asarray(bb[3:]), n) > 0 else -1.0)
+
+
+def test_thread_fits_and_screws_out_but_not_straight(split_cube):
+    a, b, plane = split_cube
+    r = apply_thread(a, b, plane, ConnectorParams(width=16, depth=9, tolerance=0.25), pitch=3.0)
+    assert is_watertight(r.piece_a) and is_watertight(r.piece_b)
+    assert (r.piece_a ^ r.piece_b).volume() < 1e-3
+    n, s = _apart(r, plane)
+    assert (r.piece_a.translate(tuple(s * 1.0 * n)) ^ r.piece_b).volume() > 1.0      # pulled straight: teeth clash
+    # a quarter turn moves the stud a quarter pitch along its axis: one of the two senses must run free
+    free = min((r.piece_a.rotate((0, 0, rot)).translate(tuple(s * 0.75 * n)) ^ r.piece_b).volume()
+               for rot in (90.0, -90.0))
+    assert free < 0.05
+
+
+# ---------- Squeeze latch ----------
+
+def test_squeeze_latch_fits_and_hooks_behind_a_shoulder(split_cube):
+    a, b, plane = split_cube
+    r = apply_squeeze(a, b, plane, ConnectorParams(width=14, depth=10, tolerance=0.2))
+    assert is_watertight(r.piece_a) and is_watertight(r.piece_b)
+    assert (r.piece_a ^ r.piece_b).volume() < 1e-3
+    n, s = _apart(r, plane)
+    assert (r.piece_a.translate(tuple(s * 1.0 * n)) ^ r.piece_b).volume() > 0.5      # hooks catch the shoulder
+    assert r.piece_a.genus() >= 0 and r.piece_a.num_tri() > 0
+
+
+def test_squeeze_latch_rejects_too_small():
+    cube = m3d.Manifold.cube([40, 40, 40], True)
+    plane = CutPlane.from_normal(point=[0, 0, 0], normal=[0, 0, 1])
+    a, b = split_solid(cube, plane)
+    with pytest.raises(ValueError):
+        apply_squeeze(a, b, plane, ConnectorParams(width=4, depth=6))

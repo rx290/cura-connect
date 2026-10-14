@@ -145,6 +145,65 @@ def apply_twist(piece_a, piece_b, plane: CutPlane, params: ConnectorParams,
     return ConnectorResult(piece_a=new_a, piece_b=new_b)
 
 
+
+def _thread_section(r_minor, depth, steps=96):
+    """One-lobe cam outline: radius r_minor..r_minor+depth as a triangle wave once round. Extruded with a twist
+    of 360 deg per pitch it sweeps a single-start helical thread (no helix maths needed)."""
+    t = np.linspace(0, 2 * np.pi, steps, endpoint=False)
+    tri = 1 - np.abs((t / np.pi) - 1)                     # 0 -> 1 -> 0 once round
+    r = r_minor + depth * np.clip(1.25 * tri - .125, 0, 1)  # small flats at crest and root print cleaner
+    return m3d.CrossSection([list(zip(r * np.cos(t), r * np.sin(t)))])
+
+
+def _thread(r_minor, depth, length, pitch):
+    turns = length / pitch
+    return m3d.Manifold.extrude(_thread_section(r_minor, depth), length,
+                                n_divisions=max(8, int(turns * 24)), twist_degrees=360.0 * turns)
+
+
+def apply_thread(piece_a, piece_b, plane: CutPlane, params: ConnectorParams,
+                 pitch: float = 3.0) -> ConnectorResult:
+    """A screw: a threaded male stud on piece_a and the matching threaded hole in piece_b. Screw one half onto
+    the other. `width` is the stud's outer diameter; the default 3 mm pitch with 0.9 mm deep teeth is coarse
+    enough to print cleanly upright in PETG/PLA. The hole is the same thread grown by `tolerance` all round."""
+    depth = min(.9, .3 * pitch)
+    r_major = params.width / 2
+    stud = _thread(r_major - depth, depth, params.depth, pitch)
+    hole = _thread(r_major - depth + params.tolerance, depth, params.depth + params.tolerance, pitch)
+    new_a = piece_a + place(stud, plane, protrude_toward_normal=False)
+    new_b = piece_b - place(hole, plane, protrude_toward_normal=False)
+    return ConnectorResult(piece_a=new_a, piece_b=new_b)
+
+
+def apply_squeeze(piece_a, piece_b, plane: CutPlane, params: ConnectorParams,
+                  fingers: int = 4, hook: float = 0.8, wall: float = 1.6) -> ConnectorResult:
+    """A squeeze latch: a hollow boss on piece_a slotted into `fingers` springy fingers, each with an outward
+    hook at its tip (ramped on the way in, flat on the back). Pinch the fingers, push into piece_b's bore,
+    release: the hooks spring out into a groove behind the bore's shoulder and hold. Pinch again to undo.
+
+    Same honesty rule as Snap: the tests prove the locked state fits and that the hook really sits behind a
+    shoulder (so a straight pull is blocked); whether your filament flexes enough is for a test print."""
+    r, tol = params.width / 2, params.tolerance
+    if r - wall < 1.0:
+        raise ValueError("width too small for a hollow squeeze latch: needs width > 2 x (wall + 1) mm")
+    hh = max(1.2, .3 * params.depth)                       # hook height along the axis
+    body = m3d.Manifold.cylinder(params.depth, r, r, circular_segments=64)
+    ramp = m3d.Manifold.cylinder(hh, r + hook, r, circular_segments=64).translate((0, 0, params.depth - hh))
+    boss = (body + ramp) - m3d.Manifold.cylinder(params.depth + 1, r - wall, r - wall, circular_segments=64)
+    slot_len = params.depth * .75
+    for k in range(fingers // 2 if fingers % 2 == 0 else fingers):
+        a = k * 180.0 / max(1, fingers // 2)
+        slot = m3d.Manifold.cube([2 * (r + hook + 1), 1.2, slot_len + 1]) \
+            .translate((-(r + hook + 1), -.6, params.depth - slot_len)).rotate((0, 0, a))
+        boss -= slot
+    bore = m3d.Manifold.cylinder(params.depth + tol, r + tol, r + tol, circular_segments=64)
+    groove = m3d.Manifold.cylinder(hh + 2 * tol, r + hook + tol, r + hook + tol, circular_segments=64) \
+        .translate((0, 0, params.depth - hh - tol))
+    new_a = piece_a + place(boss, plane, protrude_toward_normal=False)
+    new_b = piece_b - place(bore + groove, plane, protrude_toward_normal=False)
+    return ConnectorResult(piece_a=new_a, piece_b=new_b)
+
+
 def apply_snap(piece_a, piece_b, plane: CutPlane, params: ConnectorParams,
                bulge: float = 1.35) -> ConnectorResult:
     """A peg on piece_a with a bulbous tip (radius = neck radius x bulge),
