@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cura_plugin" / 
 from core.geometry import CutPlane, split_solid, is_watertight
 from core.connectors import (
     ConnectorParams, ConnectorResult,
-    apply_plug, apply_dowel, apply_dovetail, apply_snap, apply_connector_instances,
+    apply_plug, apply_dowel, apply_dovetail, apply_snap, apply_twist, apply_connector_instances,
     filter_offsets_on_solid_material, local_wall_thickness, _snap_offset_to_material,
 )
 
@@ -485,3 +485,28 @@ def test_vase_mode_snaps_a_near_miss_offset_onto_the_real_wall(split_thin_shell)
         "vase mode should snap to the nearby real wall material, not drop it "
         "the way a plain positional check would"
     )
+
+
+# ---------- Twist-lock ----------
+
+def test_twist_pieces_are_watertight_and_fit(split_cube):
+    a, b, plane = split_cube
+    p = ConnectorParams(width=16, depth=8, tolerance=0.2)
+    result = apply_twist(a, b, plane, p)
+    assert is_watertight(result.piece_a) and is_watertight(result.piece_b)
+    assert (result.piece_a ^ result.piece_b).volume() < 1e-6
+
+
+def test_twist_locks_until_turned(split_cube):
+    """Pulled straight apart the lugs hit the slot roofs; turned back by the twist angle they come out free."""
+    a, b, plane = split_cube
+    p = ConnectorParams(width=16, depth=8, tolerance=0.2)
+    r = apply_twist(a, b, plane, p, turn=30.0)
+    n = np.asarray(plane.normal, float)
+
+    apart = 1.0 if np.dot(np.asarray(r.piece_a.bounding_box()[:3]) + np.asarray(r.piece_a.bounding_box()[3:]), n) > 0 else -1.0
+
+    def clash(rot):                                # piece_a turned by rot, then pulled 1 mm away from piece_b
+        return (r.piece_a.rotate((0, 0, rot)).translate(tuple(apart * n)) ^ r.piece_b).volume()
+    assert clash(0) > 1.0
+    assert min(clash(-30.0), clash(30.0)) < 1e-3

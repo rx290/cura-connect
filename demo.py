@@ -14,7 +14,7 @@ import manifold3d as m3d
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "cura_plugin" / "CuraConnect" / "CuraConnect"))
 from core.geometry import CutPlane, split_solid, write_stl
-from core.connectors import ConnectorParams, apply_plug, apply_dowel, apply_dovetail, apply_snap
+from core.connectors import ConnectorParams, apply_plug, apply_dowel, apply_dovetail, apply_snap, apply_twist
 
 OUT = Path(sys.argv[1] if len(sys.argv) > 1 else "demo_output")
 OUT.mkdir(exist_ok=True)
@@ -33,6 +33,7 @@ connectors = {
     "plug": apply_plug,
     "dowel": apply_dowel,
     "dovetail": apply_dovetail,
+    "twist": apply_twist,
     "snap": apply_snap,
 }
 

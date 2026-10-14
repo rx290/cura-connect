@@ -114,6 +114,37 @@ def apply_dovetail(piece_a, piece_b, plane: CutPlane, params: ConnectorParams,
     return ConnectorResult(piece_a=new_a, piece_b=new_b)
 
 
+
+def _sector(r_in, r_out, a0, a1, steps=12):
+    t = np.radians(np.linspace(a0, a1, steps + 1))
+    outer = [(r_out * np.cos(v), r_out * np.sin(v)) for v in t]
+    inner = [(r_in * np.cos(v), r_in * np.sin(v)) for v in t[::-1]]
+    return m3d.CrossSection([outer + inner])
+
+
+def apply_twist(piece_a, piece_b, plane: CutPlane, params: ConnectorParams,
+                turn: float = 30.0, lugs: int = 3) -> ConnectorResult:
+    """A twist-lock (bayonet): a round boss with `lugs` lugs on piece_a, and in piece_b a round socket with an
+    L-shaped slot per lug. Push the pieces together `turn` degrees off, twist back into line: the lugs sit
+    under the slot roofs, locked against pulling apart, and the outsides line up again. Same shape as Lamp
+    Studio's bed-split twist-lock, so both tools make joints that look and fit the same."""
+    r = params.width / 2
+    lug, lug_h, tol = max(1.2, .25 * params.width), max(1.5, .3 * params.depth), params.tolerance
+    boss = m3d.Manifold.cylinder(params.depth, r, r, circular_segments=64)
+    sock = m3d.Manifold.cylinder(params.depth + tol, r + tol, r + tol, circular_segments=64)
+    for k in range(lugs):
+        a = 90.0 + k * 360.0 / lugs
+        boss += m3d.Manifold.extrude(_sector(r - .5, r + lug, a - 10, a + 10), lug_h) \
+            .translate((0, 0, params.depth - lug_h))
+        entry = a - turn
+        sock += m3d.Manifold.extrude(_sector(r, r + lug + tol, entry - 11, entry + 11), params.depth + tol)
+        sock += m3d.Manifold.extrude(_sector(r, r + lug + tol, entry - 11, a + 11), lug_h + 2 * tol) \
+            .translate((0, 0, params.depth - lug_h - tol))
+    new_a = piece_a + place(boss, plane, protrude_toward_normal=False)
+    new_b = piece_b - place(sock, plane, protrude_toward_normal=False)
+    return ConnectorResult(piece_a=new_a, piece_b=new_b)
+
+
 def apply_snap(piece_a, piece_b, plane: CutPlane, params: ConnectorParams,
                bulge: float = 1.35) -> ConnectorResult:
     """A peg on piece_a with a bulbous tip (radius = neck radius x bulge),

@@ -11,7 +11,7 @@ Item
     height: childrenRect.height
     UM.I18nCatalog { id: catalog; name: "cura" }
 
-    property var connectorTypes: ["dovetail", "plug", "dowel", "snap"]
+    property var connectorTypes: ["dovetail", "plug", "dowel", "snap", "twist"]
 
     Column
     {

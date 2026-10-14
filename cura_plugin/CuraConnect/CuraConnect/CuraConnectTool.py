@@ -57,7 +57,7 @@ from .core.geometry import (
     rotate_vector, connector_count_for_width,
 )
 from .core.connectors import (
-    ConnectorParams, apply_plug, apply_dowel, apply_dovetail, apply_snap, apply_connector_instances,
+    ConnectorParams, apply_plug, apply_dowel, apply_dovetail, apply_snap, apply_twist, apply_connector_instances,
 )
 from .core.scene_bridge import cura_vertices_to_manifold, manifold_to_cura_vertices
 from .CutPlaneIndicator import CutPlaneIndicator
@@ -68,6 +68,7 @@ _CONNECTOR_FUNCTIONS = {
     "dowel": apply_dowel,
     "snap": apply_snap,
     "dovetail": apply_dovetail,
+    "twist": apply_twist,
 }
 
 _AXIS_NORMALS = {
