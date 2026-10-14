@@ -115,6 +115,8 @@ class CuraConnectTool(Tool):
         self._controller = self.getController()
         self._picking_pass = None
 
+        self._busy = False
+        self._status = "Select a model to preview its cut plane."
         self._connector_type = "dovetail"
         self._width = 8.0
         self._depth = 6.0
@@ -141,6 +143,7 @@ class CuraConnectTool(Tool):
         self.setExposedProperties(
             "ConnectorType", "Width", "Depth", "Tolerance", "CutAxis",
             "PlanePosition", "PlaneSize", "ConnectorCount", "TiltAngle", "VaseMode",
+            "PlaneMinimum", "PlaneMaximum", "Busy", "Status",
         )
 
     def event(self, event):
@@ -312,6 +315,7 @@ class CuraConnectTool(Tool):
             node = Selection.getSelectedObject(0)
             if node is not None:
                 self._autoSuggestPlane(node)
+        self.propertyChanged.emit()
 
     def _resetPlane(self) -> None:
         self._has_plane = False
@@ -467,14 +471,65 @@ class CuraConnectTool(Tool):
         self._handle.setPosition(Vector(float(center[0]), float(center[1]), float(center[2])))
         self._handle.setRing(self._cut_axis, self._plane_size / 2)
 
+    def getBusy(self) -> bool:
+        return self._busy
+
+    def getStatus(self) -> str:
+        return self._status
+
+    def _planeBounds(self):
+        node = Selection.getSelectedObject(0)
+        bbox = node.getBoundingBox() if node is not None else None
+        if bbox is None:
+            return (0.0, 0.0)
+        axis = self._cut_axis.lower()
+        return (float(getattr(bbox.minimum, axis)), float(getattr(bbox.maximum, axis)))
+
+    def getPlaneMinimum(self) -> float:
+        return self._planeBounds()[0]
+
+    def getPlaneMaximum(self) -> float:
+        return self._planeBounds()[1]
+
+    def previewCut(self) -> None:
+        if self._busy:
+            return
+        node = Selection.getSelectedObject(0)
+        if node is None or node.getMeshData() is None:
+            self._status = "Select a model to preview its cut plane."
+        else:
+            if not self._has_plane:
+                self._autoSuggestPlane(node)
+            else:
+                self._renderPlane(node)
+            self._status = "Plane preview ready. Adjust position, then Cut."
+        self.propertyChanged.emit()
+
     def performCut(self) -> None:
+        if self._busy:
+            return
+        self._busy = True
+        self._status = "Cutting model…"
+        self.propertyChanged.emit()
+        try:
+            self._performCut()
+        except Exception as error:
+            Logger.logException("e", "CuraConnectTool: cut failed")
+            self._status = f"Cut failed: {error}"
+        finally:
+            self._busy = False
+            self.propertyChanged.emit()
+
+    def _performCut(self) -> None:
         node = Selection.getSelectedObject(0)
         if node is None or not self._has_plane:
+            self._status = "Select a model and preview a cut plane first."
             Logger.log("w", "CuraConnectTool: no cut plane placed yet -- click on the model first")
             return
 
         mesh_data = node.getMeshData()
         if mesh_data is None:
+            self._status = "The selected model has no mesh to cut."
             Logger.log("w", "CuraConnectTool: selected node has no mesh data, nothing to cut")
             return
 
@@ -483,6 +538,7 @@ class CuraConnectTool(Tool):
         try:
             solid = cura_vertices_to_manifold(world_verts)
         except Exception as e:
+            self._status = f"Could not read the model: {e}"
             Logger.log("e", f"CuraConnectTool: could not convert mesh to a solid: {e}")
             return
 
@@ -495,6 +551,7 @@ class CuraConnectTool(Tool):
 
         a, b = split_solid(solid, plane)
         if a.volume() < 1e-6 or b.volume() < 1e-6:
+            self._status = "Move the plane inside the model to cut two pieces."
             Logger.log("w", "CuraConnectTool: the plane doesn't actually split the model into two "
                              "pieces (it's outside the model's extent along the chosen axis) -- nothing done")
             return
@@ -505,6 +562,7 @@ class CuraConnectTool(Tool):
             result = apply_connector_instances(a, b, plane, params, connector_fn, self._connector_offsets,
                                                 vase_mode=self._vase_mode)
         except ValueError as e:
+            self._status = f"Check connector size: {e}"
             Logger.log("e", f"CuraConnectTool: connector geometry rejected these parameters: {e}")
             return
 
@@ -526,6 +584,7 @@ class CuraConnectTool(Tool):
             scene.sceneChanged.emit(new_node)
 
         self._resetPlane()
+        self._status = f"Cut complete: {len(new_nodes)} pieces created."
 
     def _buildSceneNode(self, manifold, name: str) -> CuraSceneNode:
         flat_verts = manifold_to_cura_vertices(manifold)
